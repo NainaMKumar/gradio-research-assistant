@@ -38,7 +38,7 @@ output_dir = Path("arxiv_pdfs")
 existing_papers_path.mkdir(exist_ok=True)
 
 embedding_cache =  Path("embedding_cache")
-existing_papers_path.mkdir(exist_ok=True)
+embedding_cache.mkdir(exist_ok=True)
 
 llm_device = "CPU"
 ov_config = {hints.performance_mode(): hints.PerformanceMode.LATENCY, streams.num(): "1", props.cache_dir(): ""}
@@ -264,6 +264,7 @@ if st.session_state.messages[-1]["role"] != "assistant":
                 if index:
 
                     st.session_state.index = index
+                    st.session_state.vector_tool = get_vector_tool()
 
             st.write(response.response)
             message = {"role": "assistant", "content": response.response}
