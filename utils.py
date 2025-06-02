@@ -2,9 +2,15 @@ import json
 import os
 import arxiv
 from pathlib import Path
-import streamlit as st
+import openvino as ov
+import gradio as gr
 
 client = arxiv.Client()
+
+def get_available_devices():
+    """Get available devices for OpenVINO."""
+    core = ov.Core()
+    return {device.split(".")[0] for device in core.available_devices}
 
 def save_arxiv_ids(ids): 
     
@@ -22,7 +28,7 @@ def open_arxiv_ids():
         print("file not created")
         return []
     
-def search_arxiv(query, max_results = 5):
+def search_arxiv(query, max_results):
     results = arxiv.Search(
         query=query,
         max_results=max_results,
@@ -33,42 +39,6 @@ def search_arxiv(query, max_results = 5):
         {"title": result.title, "id": result.entry_id.split('/')[-1]}
         for result in results
     ]
-
-"""uncomment if you want to store IDs in json and avoid duplicates"""
-# def search_arxiv(query, max_results = 5): 
-
-#     saved_ids = open_arxiv_ids()
-    
-#     search = arxiv.Search(
-#         query = query, 
-#         max_results = max_results, 
-#         sort_by = arxiv.SortCriterion.Relevance
-#     )
-
-#     results = []
-
-#     for r in client.results(search): 
-
-#         arxiv_id = r.entry_id.split('/')[-1]
-
-#         if arxiv_id in saved_ids: 
-#             continue 
-            
-#         results.append({
-#             "title": r.title,
-#             "id": arxiv_id,
-#             # "authors": [author.name for author in r.authors],
-#             # "abstract": r.summary,
-#             # "pdf_url": r.pdf_url
-#         })
-
-#         saved_ids.append(arxiv_id)
-        
-#     save_arxiv_ids(saved_ids)
-        
-
-#     return results #returns empty list if nothing gets added 
-
 
 
 def download_papers(arxiv_ids, output_dir):
@@ -82,7 +52,7 @@ def download_papers(arxiv_ids, output_dir):
         pdf_path = os.path.join(output_dir, f"{paper_id}.pdf")
     
         if os.path.exists(pdf_path):
-            st.write(f"Skipping paper... already exists: {paper_id}.pdf")
+            gr.Info(f"Skipping paper... already exists: {paper_id}.pdf")
             continue
     
         try: 
@@ -93,7 +63,7 @@ def download_papers(arxiv_ids, output_dir):
             paper.download_pdf(dirpath=output_dir, filename=f"{paper_id}.pdf")
         
         except Exception as e:
-            st.write(f"An error occured: {e}")
+            print(f"An error occured: {e}")
 
 def phi_completion_to_prompt(completion):
     return f"<|system|><|end|><|user|>{completion}<|end|><|assistant|>\n"

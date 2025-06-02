@@ -4,10 +4,12 @@ import re
 import yaml
 import numpy as np
 import pickle
+import argparse
 
 import huggingface_hub as hf_hub
 from huggingface_hub import list_models
 
+import openvino as ov
 import openvino.properties as props
 import openvino.properties.hint as hints
 import openvino.properties.streams as streams
@@ -22,12 +24,12 @@ from llama_index.core import SimpleDirectoryReader
 from llama_index.core import VectorStoreIndex, Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.tools import QueryEngineTool, ToolMetadata
+from llama_index.tools.arxiv import ArxivToolSpec
 
+import gradio as gr
 
 from utils import search_arxiv, download_papers, completion_to_prompt
 from paths import Assit_paths
-
-import streamlit as st
 
 system_prompt_path = "system_prompt.yaml"
 
@@ -35,16 +37,22 @@ existing_papers_path = Path("existing_papers")
 existing_papers_path.mkdir(exist_ok=True)
 
 output_dir = Path("arxiv_pdfs")
-existing_papers_path.mkdir(exist_ok=True)
+output_dir.mkdir(exist_ok=True)
 
 embedding_cache =  Path("embedding_cache")
 embedding_cache.mkdir(exist_ok=True)
 
-llm_device = "CPU"
 ov_config = {hints.performance_mode(): hints.PerformanceMode.LATENCY, streams.num(): "1", props.cache_dir(): ""}
-
 ov_llm = None
 ov_embedding = None
+
+index = None
+agent = None
+
+def get_available_devices():
+    """Get available devices for OpenVINO."""
+    core = ov.Core()
+    return {device.split(".")[0] for device in core.available_devices}
 
 def load_cached_embeddings():
     all_nodes = []
@@ -66,23 +74,19 @@ def generate_embeddings(file_path, output_dir):
     try: 
 
         all_nodes = []
-
-        if output_dir is not None:
-            files = list(Path(output_dir).iterdir())
-        else:
-            files = [Path(file_path)]
+        files = list(Path(output_dir).iterdir() if output_dir else [Path(file_path)])
         
         for file in files:
             cache_path = Path(embedding_cache) / file.stem
 
             if cache_path.exists():
-                st.write(f"Loading cached embeddings for {file.stem}")
+                gr.Info(f"Loading cached embeddings for {file.stem}")
                 
                 with open(cache_path, "rb") as f:
                     nodes = pickle.load(f)
 
             else:
-                st.write(f"Generating embeddings for {file.stem}")
+                gr.Info(f"Generating embeddings for {file.stem}")
                 reader = SimpleDirectoryReader(input_files=[str(file)])
                 documents = reader.load_data()
 
@@ -105,14 +109,12 @@ def generate_embeddings(file_path, output_dir):
 
                 
     except Exception as e:
-        st.error(f"Embedding generation failed: {e}")  
-
-
+        raise gr.Error(f"Embedding generation failed: {e}")  
 
 def arxiv_query(input: str, **kwargs) -> str: 
     """Finds research papers on arxiv based on query."""
 
-    results = search_arxiv(input)
+    results = search_arxiv(input, max_results = 5)
     return results
     
 def load_chat_model(model_type):
@@ -123,12 +125,11 @@ def load_chat_model(model_type):
         try:
             hf_hub.snapshot_download(repo_id=model_type, local_dir=str(model_path))
         except Exception as e:
-            st.error(f"Download failed: {e}")
-            st.stop()
+            raise gr.Error(f"Download failed: {e}")
     
     else: 
         try: 
-            st.write(f"Model '{model_name}' already downloaded.")
+            gr.Info(f"Model '{model_name}' already downloaded.")
 
             llm = OpenVINOLLM(
             model_id_or_path=str(model_type),
@@ -137,14 +138,13 @@ def load_chat_model(model_type):
             model_kwargs={"ov_config": ov_config},
             generate_kwargs={"do_sample": False, "temperature": None, "top_p": None},
             completion_to_prompt=completion_to_prompt,
-            device_map=llm_device
+            device_map="GPU" if "GPU" in get_available_devices() else "CPU" 
         )
             Settings.llm = llm
             return llm
 
         except Exception as e: 
-            st.error(f"Failed to load LLM: {e}")
-            st.stop()
+            raise gr.Error(f"Failed to load LLM: {e}")
 
 def load_embedding_model():
 
@@ -155,18 +155,19 @@ def load_embedding_model():
             "BAAI/bge-small-en-v1.5", str(model_path)
         )
 
-    embedding = OpenVINOEmbedding(model_id_or_path=str(model_path), device="cpu")
+    device = "GPU" if "GPU" in get_available_devices() else "CPU" 
+    embedding = OpenVINOEmbedding(model_id_or_path=str(model_path), device=device)
     Settings.embed_model = embedding
     
     return embedding
 
 def get_vector_tool():
 
-    if st.session_state.index is None:
-        return "Vector index not yet initialized"
+    if index is None:
+        return None
     
     return QueryEngineTool(
-        st.session_state.index.as_query_engine(streaming=True),
+        index.as_query_engine(streaming=True),
         metadata=ToolMetadata(
             name="vector_search",
             description=
@@ -176,97 +177,110 @@ def get_vector_tool():
         )
 
 #Set Model Type
+def initialize_agent():
 
-format_type = "int4"
-models = list_models(author="OpenVINO")
-models_list = [model.modelId for model in models]
-model_type_options = np.sort([model for model in models_list if format_type in model])
-model_type = st.selectbox("Model Type", model_type_options) #ex. "OpenVINO/Qwen/2-1.5B-Instruct-int4-ov"
+    global agent 
 
-if st.checkbox(f"Download model '{model_type}'?"):
-    try:
-        ov_llm = load_chat_model(model_type)
-        ov_embedding = load_embedding_model()
-
-    except Exception as e: 
-        st.error(f"Error loading models: {e}")
+    with open(system_prompt_path, "rb") as f:
+        system_prompt = yaml.safe_load(f)
     
-#Set up streamlit
-st.title("Neuroscience Research Assistant")
-
-#Set up index
-if "index" not in st.session_state: 
-    st.session_state.index = load_cached_embeddings()
-
-
-arxiv_tool = FunctionTool.from_defaults(fn=arxiv_query, 
+    arxiv_tool = FunctionTool.from_defaults(fn=arxiv_query, 
                                         name = "arxiv_query", 
                                         description = 
                                         "Use this tool ONLY when the user asks you to find new research papers, search arXiv, or look for new literature. "
                                         "DO NOT use this tool to answer questions about already uploaded PDFs."
                                        )
-tools = [arxiv_tool]
-if st.session_state.index is not None and "vector_tool" not in st.session_state:
-    st.session_state.vector_tool = get_vector_tool()
-    tools.append(st.session_state.vector_tool)
+    tools = [arxiv_tool]
+    vector_tool = get_vector_tool()
 
-with open(system_prompt_path, "rb") as f:
-    system_prompt = yaml.safe_load(f)
+    if vector_tool:
+        tools.append(vector_tool)
+
+    agent = ReActAgent.from_tools(tools=tools, llm=ov_llm, verbose=True, system_prompt = system_prompt, max_iterations=7)
     
-#Set up agent
-if "agent" not in st.session_state: 
-    st.session_state.agent = ReActAgent.from_tools(tools=tools, llm=ov_llm, verbose=True, system_prompt = system_prompt, max_iterations=7)
+def process_input(message, history, pdfs):
+
+    global index
+
+    if pdfs is not None:
+        for pdf in pdfs:
+            file_path = existing_papers_path / pdf.name
+            index = generate_embeddings(file_path = file_path, output_dir = None)
+        
+    response = agent.chat(message)
+
+    # arxiv_ids = re.findall(r"arXiv ID:\s(.+)", response.response, re.IGNORECASE)
+    arxiv_ids = re.findall(r"(?i)\barxiv(?:\s*ID)?\s*:\s*([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", response.response, re.IGNORECASE)
+    print(arxiv_ids)
+    arxiv_url = re.findall(r'arxiv\.org/abs/(\d{4}\.\d{4,5}(?:v\d+)?)', response.response, re.IGNORECASE)
+    print(arxiv_url)
+                
+    if arxiv_ids or arxiv_url:  
+
+        if arxiv_ids: 
+            download_papers(arxiv_ids, output_dir = output_dir)
+        else:
+            download_papers(arxiv_url, output_dir = output_dir)
+
+        #Generate embeddings
+        new_index = generate_embeddings(file_path = None, output_dir = output_dir)
+            
+        #Insert into index
+        if new_index:
+            index = new_index
+            initialize_agent()
     
-if "messages" not in st.session_state.keys(): # Initialize the chat message history
-    st.session_state.messages = [
-        {"role": "assistant", "content": "Ask me to find and download research papers and summarize them!"}
-    ]
+    return response.response
 
-uploaded_files = st.file_uploader(
-    "Choose a PDF file", accept_multiple_files=True
-)
+format_type = "int4"
+models = list_models(author="OpenVINO")
+model_type_options = sorted([model.modelId for model in models if format_type in model.modelId])
 
-if uploaded_files:
-    for uploaded_file in uploaded_files:
-        file_path = existing_papers_path / uploaded_file.name
-        st.session_state.index = generate_embeddings(file_path = file_path, output_dir = None)
+with gr.Blocks() as demo:
+    
+    gr.Markdown("# Neuroscience Research Assistant")
+
+    chatbot = gr.Chatbot(type="messages", height=400)
+    with gr.Column():
+        msg = gr.Textbox(label="Your question", scale=4)
+        pdfs = gr.File(file_types=[".pdf"], file_count="multiple", label="Upload PDFs")
+        model_type = gr.Dropdown(choices=model_type_options, label="Model Type", scale=2)
+
+    def add_user_message(message, history):
+        history.append({"role": "user", "content": message})
+        return "", history
+
+    def respond(_, history, pdfs, model_type):
+        global ov_llm, ov_embedding, index
+        
+        #initialize once
+        ov_llm = load_chat_model(model_type)
+        ov_embedding = load_embedding_model()
+        index = load_cached_embeddings()
+        initialize_agent()
 
 
-if prompt := st.chat_input("Your question"): # Prompt for user input and save to chat history
-    st.session_state.messages.append({"role": "user", "content": prompt})
+        message = history[-1]["content"]
+        response = process_input(message, history, pdfs)
+        history.append({"role": "assistant", "content": response})
+        return history
 
-for message in st.session_state.messages: # Display the prior chat messages
-    with st.chat_message(message["role"]):
-        st.write(message["content"])
+    msg.submit(
+        fn=add_user_message,
+        inputs=[msg, chatbot],
+        outputs=[msg, chatbot]
+    ).then(
+        fn=respond,
+        inputs=[msg, chatbot, pdfs, model_type],
+        outputs=chatbot
+    )
 
-# If last message is not from assistant, generate a new response
-if st.session_state.messages[-1]["role"] != "assistant":
-    with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
-                
-            response = st.session_state.agent.chat(prompt)
 
-            #check if response contains arxiv IDs
-            
-            # arxiv_ids = re.findall(r"arXiv ID:\s(.+)", response.response, re.IGNORECASE)
-            arxiv_ids = re.findall(r"(?i)\barxiv(?:\s*ID)?\s*:\s*([0-9]{4}\.[0-9]{4,5}(?:v\d+)?)", response.response, re.IGNORECASE)
-                
-            if arxiv_ids: 
-                
-                #Download papers
-                download_papers(arxiv_ids, output_dir = output_dir)
-                st.info("Download complete!")
 
-                #Generate embeddings
-                index = generate_embeddings(file_path = None, output_dir = output_dir)
-            
-                #Insert into index
-                if index:
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--public", default=False, action="store_true")
+    parser.add_argument("--local_network", default=False, action="store_true")
+    args = parser.parse_args()
 
-                    st.session_state.index = index
-                    st.session_state.vector_tool = get_vector_tool()
-
-            st.write(response.response)
-            message = {"role": "assistant", "content": response.response}
-            st.session_state.messages.append(message) # Add response to message history
-
+    demo.launch(server_name="0.0.0.0" if args.local_network else None, share=args.public)
