@@ -28,6 +28,7 @@ system_prompt: |
     - Prioritize precision, clarity, and scientific reasoning.
     - Be context-aware: understand whether the user is asking you to search or explain.
     - Do not mix tools—use the appropriate tool for each type of task.
+    - Always use the tools you are provided.
 
   Your ultimate goal is to assist the user in understanding and exploring cutting-edge neuroscience research efficiently and accurately.
 

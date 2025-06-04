@@ -25,6 +25,7 @@ from llama_index.core import VectorStoreIndex, Settings
 from llama_index.core.node_parser import SentenceSplitter
 from llama_index.core.tools import QueryEngineTool, ToolMetadata
 from llama_index.tools.arxiv import ArxivToolSpec
+from llama_index.core.agent.runner.base import AgentRunner
 
 import gradio as gr
 
@@ -48,6 +49,7 @@ ov_embedding = None
 
 index = None
 agent = None
+runner = None 
 
 def get_available_devices():
     """Get available devices for OpenVINO."""
@@ -179,7 +181,7 @@ def get_vector_tool():
 #Set Model Type
 def initialize_agent():
 
-    global agent 
+    global agent, runner 
 
     with open(system_prompt_path, "rb") as f:
         system_prompt = yaml.safe_load(f)
@@ -197,7 +199,7 @@ def initialize_agent():
         tools.append(vector_tool)
 
     agent = ReActAgent.from_tools(tools=tools, llm=ov_llm, verbose=True, system_prompt = system_prompt, max_iterations=7)
-    
+
 def process_input(message, history, pdfs):
 
     global index
@@ -232,55 +234,66 @@ def process_input(message, history, pdfs):
     
     return response.response
 
-format_type = "int4"
-models = list_models(author="OpenVINO")
-model_type_options = sorted([model.modelId for model in models if format_type in model.modelId])
+# format_type = "int4"
+# models = list_models(author="OpenVINO")
+# model_type_options = sorted([model.modelId for model in models if format_type in model.modelId])
 
-with gr.Blocks() as demo:
-    
-    gr.Markdown("# Neuroscience Research Assistant")
 
-    chatbot = gr.Chatbot(type="messages", height=400)
-    with gr.Column():
-        msg = gr.Textbox(label="Your question", scale=4)
-        pdfs = gr.File(file_types=[".pdf"], file_count="multiple", label="Upload PDFs")
-        model_type = gr.Dropdown(choices=model_type_options, label="Model Type", scale=2)
+def add_user_message(message, history):
+    history.append({"role": "user", "content": message})
+    return "", history
 
-    def add_user_message(message, history):
-        history.append({"role": "user", "content": message})
-        return "", history
+def respond(_, history, pdfs):
 
-    def respond(_, history, pdfs, model_type):
-        global ov_llm, ov_embedding, index
+    message = history[-1]["content"]
+    response = process_input(message, history, pdfs)
+    history.append({"role": "assistant", "content": response})
+    return history
+
+def create_UI():
+    with gr.Blocks() as demo:
         
-        #initialize once
-        ov_llm = load_chat_model(model_type)
-        ov_embedding = load_embedding_model()
-        index = load_cached_embeddings()
-        initialize_agent()
+        gr.Markdown("# Neuroscience Research Assistant")
 
+        chatbot = gr.Chatbot(type="messages", height=400)
+        with gr.Column():
+            msg = gr.Textbox(label="Your question", scale=4)
+            pdfs = gr.File(file_types=[".pdf"], file_count="multiple", label="Upload PDFs")
+            # model_type = gr.Dropdown(choices=model_type_options, label="Model Type", scale=2)
 
-        message = history[-1]["content"]
-        response = process_input(message, history, pdfs)
-        history.append({"role": "assistant", "content": response})
-        return history
+        msg.submit(
+            fn=add_user_message,
+            inputs=[msg, chatbot],
+            outputs=[msg, chatbot]
+        ).then(
+            fn=respond,
+            inputs=[msg, chatbot, pdfs],
+            outputs=chatbot
+        )
+        
+        return demo
 
-    msg.submit(
-        fn=add_user_message,
-        inputs=[msg, chatbot],
-        outputs=[msg, chatbot]
-    ).then(
-        fn=respond,
-        inputs=[msg, chatbot, pdfs, model_type],
-        outputs=chatbot
-    )
+def run(model_type, is_public, local_network):
+    global ov_llm, ov_embedding, index
 
+    #initialize once
+    ov_llm = load_chat_model(model_type)
+    ov_embedding = load_embedding_model()
+    index = load_cached_embeddings()
+    initialize_agent()
 
+    demo = create_UI()
+    demo.launch(server_name="0.0.0.0" if local_network else None, share=is_public)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
+    parser.add_argument("--chat_model", type=str, default="OpenVINO/Qwen2-1.5B-Instruct-int4-ov")
     parser.add_argument("--public", default=False, action="store_true")
     parser.add_argument("--local_network", default=False, action="store_true")
     args = parser.parse_args()
 
-    demo.launch(server_name="0.0.0.0" if args.local_network else None, share=args.public)
+    run(args.chat_model, args.public, args.local_network)
+
+
+
+    

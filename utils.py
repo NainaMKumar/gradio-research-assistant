@@ -35,11 +35,11 @@ def search_arxiv(query, max_results):
         sort_by=arxiv.SortCriterion.Relevance
     ).results()
 
-    return [
-        {"title": result.title, "id": result.entry_id.split('/')[-1]}
-        for result in results
-    ]
-
+    papers = [{"title": result.title, "id": result.entry_id.split('/')[-1]} for result in results]
+    output = "\n"
+    for index, paper in enumerate(papers): 
+        output += f"{index + 1}. {paper['title']}  ArXiv ID:{paper['id']}\n"
+    return output
 
 def download_papers(arxiv_ids, output_dir):
     try: 
