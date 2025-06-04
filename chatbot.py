@@ -234,11 +234,6 @@ def process_input(message, history, pdfs):
     
     return response.response
 
-# format_type = "int4"
-# models = list_models(author="OpenVINO")
-# model_type_options = sorted([model.modelId for model in models if format_type in model.modelId])
-
-
 def add_user_message(message, history):
     history.append({"role": "user", "content": message})
     return "", history
