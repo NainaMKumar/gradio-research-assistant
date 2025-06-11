@@ -243,7 +243,6 @@ def process_input(message, history, pdfs):
     
     return response.response
 
-
 def add_user_message(message, history):
     history.append({"role": "user", "content": message})
     return "", history
