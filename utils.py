@@ -38,15 +38,10 @@ def search_arxiv(query, max_results):
     papers = [{"title": result.title, "id": result.entry_id.split('/')[-1]} for result in results]
     output = "\n"
     for index, paper in enumerate(papers): 
-        output += f"{index + 1}. {paper['title']}  ArXiv ID:{paper['id']}\n"
+        output += f"{index + 1}. {paper['title']}  arXiv ID:{paper['id']}\n"
     return output
 
 def download_papers(arxiv_ids, output_dir):
-    try: 
-        os.mkdir(output_dir)
-    
-    except Exception as e: 
-        print(f"An error occured: {e}")
     
     for paper_id in arxiv_ids:
         pdf_path = os.path.join(output_dir, f"{paper_id}.pdf")
